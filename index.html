@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Chatbot</title>
+<style>
+  :root { --bg:#0e1117; --panel:#262730; --card:#1a1c24; --border:#3a3c48; --text:#fafafa; --muted:#9aa0a6; --accent:#ff4b4b; }
+  * { box-sizing: border-box; }
+  body { margin:0; height:100vh; display:flex; background:var(--bg); color:var(--text);
+         font-family: system-ui, "Segoe UI", Roboto, sans-serif; }
+  button { font:inherit; cursor:pointer; }
+
+  /* sidebar */
+  #sidebar { width:290px; background:var(--panel); padding:16px; display:flex; flex-direction:column; gap:10px; overflow-y:auto; }
+  #sidebar h1 { font-size:20px; margin:0 0 4px; }
+  .btn { width:100%; padding:9px 12px; border-radius:8px; border:1px solid var(--border); background:transparent; color:var(--text); }
+  .btn:hover { background:#31333f; }
+  .btn.primary { background:var(--accent); border-color:var(--accent); font-weight:600; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .section { margin-top:10px; padding-top:12px; border-top:1px solid var(--border); }
+  .label { font-size:12px; color:var(--muted); margin-bottom:6px; }
+  .chat-item { display:flex; align-items:center; gap:6px; padding:8px 10px; border-radius:8px; border:1px solid var(--border); cursor:pointer; margin-bottom:6px; }
+  .chat-item:hover { background:#31333f; }
+  .chat-item.active { border-color:var(--accent); }
+  .chat-item span { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }
+  .chat-item button { background:none; border:none; color:var(--muted); padding:0 4px; }
+  .chat-item button:hover { color:var(--accent); }
+  .doc { font-size:13px; padding:3px 0; word-break:break-all; }
+  #status { font-size:12px; color:var(--muted); margin-top:6px; white-space:pre-wrap; }
+  input[type=file] { width:100%; font-size:12px; color:var(--muted); margin-bottom:6px; }
+
+  /* main */
+  #main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #messages { flex:1; overflow-y:auto; padding:24px max(16px, calc((100% - 820px)/2)); }
+  .msg { padding:12px 16px; border-radius:10px; margin-bottom:14px; line-height:1.55; white-space:pre-wrap; word-wrap:break-word; }
+  .msg.user { background:var(--card); }
+  .msg.assistant { background:transparent; }
+  .msg code { background:#2d2f3a; padding:1px 5px; border-radius:4px; }
+  .note { font-size:13px; color:var(--muted); margin:-6px 0 12px 16px; word-break:break-word; }
+  .note.err { color:#ff8080; }
+  .empty { color:var(--muted); background:#16283a; padding:14px 16px; border-radius:10px; }
+
+  /* approval card */
+  #approval { margin:0 max(16px, calc((100% - 820px)/2)) 10px; padding:14px; border:1px solid #b8860b; border-radius:10px; background:#2a2412; }
+  #approval .warn { margin-bottom:10px; }
+  #approval label { display:block; font-size:12px; color:var(--muted); margin:8px 0 3px; }
+  #approval input, #approval textarea { width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--card); color:var(--text); font:inherit; }
+  #approval .row { display:flex; gap:10px; margin-top:12px; }
+
+  /* composer */
+  #composer { padding:12px max(16px, calc((100% - 820px)/2)) 20px; display:flex; gap:10px; }
+  #input { flex:1; resize:none; max-height:160px; padding:12px 14px; border-radius:10px; border:1px solid var(--border);
+           background:var(--panel); color:var(--text); font:inherit; }
+  #input:focus { outline:none; border-color:var(--accent); }
+  #send { width:46px; border-radius:10px; border:none; background:var(--accent); color:white; font-size:18px; }
+  #send:disabled { opacity:.5; cursor:not-allowed; }
+  @media (max-width:700px) { #sidebar { display:none; } }
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <h1>🤖 My Chatbot</h1>
+  <button class="btn primary" id="newChat">➕ New chat</button>
+
+  <div class="section">
+    <div class="label">Your chats</div>
+    <div id="chatList"></div>
+  </div>
+
+  <div class="section">
+    <div class="label">📚 Documents (RAG)</div>
+    <input type="file" id="files" multiple accept=".pdf,.txt,.md">
+    <button class="btn" id="upload">➕ Add documents</button>
+    <div id="docList" style="margin-top:8px"></div>
+    <button class="btn" id="clearDocs" style="margin-top:6px">🧹 Clear documents</button>
+    <div id="status"></div>
+  </div>
+</aside>
+
+<section id="main">
+  <div id="messages"></div>
+  <div id="approval" hidden></div>
+  <div id="composer">
+    <textarea id="input" rows="1" placeholder="Type your message... (Enter to send, Shift+Enter for a new line)"></textarea>
+    <button id="send">➤</button>
+  </div>
+</section>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let currentId = null, busy = false, pendingCalls = null;
+
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const fmt = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
+const scrollDown = () => { const m = $("#messages"); m.scrollTop = m.scrollHeight; };
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+/* ---------- messages ---------- */
+function addMsg(role, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + role;
+  d.raw = text;
+  d.innerHTML = fmt(text);
+  $("#messages").append(d);
+  scrollDown();
+  return d;
+}
+function addNote(text, err = false) {
+  const d = document.createElement("div");
+  d.className = "note" + (err ? " err" : "");
+  d.textContent = text;
+  $("#messages").append(d);
+  scrollDown();
+}
+function setBusy(b) {
+  busy = b;
+  $("#input").disabled = b || !!pendingCalls;
+  $("#send").disabled = b || !!pendingCalls;
+  $("#input").placeholder = pendingCalls ? "Approve or reject the action above first..." : "Type your message... (Enter to send, Shift+Enter for a new line)";
+}
+
+/* ---------- chats ---------- */
+async function loadChats() {
+  let list = await api("/api/chats");
+  if (currentId && !list.some((c) => c.id === currentId)) list = [{ id: currentId, title: "New chat" }, ...list];
+  const box = $("#chatList");
+  box.innerHTML = "";
+  list.forEach((c) => {
+    const row = document.createElement("div");
+    row.className = "chat-item" + (c.id === currentId ? " active" : "");
+    const t = document.createElement("span");
+    t.textContent = c.title;
+    const x = document.createElement("button");
+    x.textContent = "✕";
+    x.title = "Delete this chat";
+    x.onclick = async (e) => { e.stopPropagation(); await deleteChat(c.id); };
+    row.onclick = () => openChat(c.id);
+    row.append(t, x);
+    box.append(row);
+  });
+}
+async function newChat() {
+  const { id } = await api("/api/chats", { method: "POST" });
+  await openChat(id);
+}
+async function openChat(id) {
+  currentId = id;
+  pendingCalls = null;
+  hideApproval();
+  const data = await api("/api/chats/" + id);
+  $("#messages").innerHTML = "";
+  if (!data.messages.length) {
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = "Start a conversation below.";
+    $("#messages").append(e);
+  }
+  data.messages.forEach((m) => (m.role === "tool" ? addNote("🔧 " + m.text) : addMsg(m.role, m.text)));
+  if (data.pending) showApproval(data.pending.calls);
+  setBusy(false);
+  await loadChats();
+}
+async function deleteChat(id) {
+  await api("/api/chats/" + id, { method: "DELETE" });
+  if (id === currentId) {
+    const list = await api("/api/chats");
+    list.length ? await openChat(list[0].id) : await newChat();
+  } else {
+    await loadChats();
+  }
+}
+
+/* ---------- streaming ---------- */
+async function readStream(resp, onEvent) {
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      if (block.startsWith("data: ")) onEvent(JSON.parse(block.slice(6)));
+    }
+  }
+}
+async function runStream(url, body) {
+  setBusy(true);
+  let bubble = null;
+  try {
+    const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!resp.ok) throw new Error(await resp.text());
+    await readStream(resp, (ev) => {
+      if (ev.type === "token") {
+        if (!bubble) bubble = addMsg("assistant", "");
+        bubble.raw += ev.text;
+        bubble.innerHTML = fmt(bubble.raw);
+        scrollDown();
+      } else if (ev.type === "tool") {
+        bubble = null;
+        addNote("🔧 " + ev.text);
+      } else if (ev.type === "tool_result") {
+        addNote("↳ " + ev.text);
+      } else if (ev.type === "approval") {
+        showApproval(ev.calls);
+      } else if (ev.type === "error") {
+        addNote("⚠️ " + ev.text, true);
+      }
+    });
+  } catch (e) {
+    addNote("⚠️ " + e.message, true);
+  }
+  setBusy(false);
+  await loadChats();
+}
+async function send() {
+  const text = $("#input").value.trim();
+  if (!text || busy || pendingCalls) return;
+  $("#input").value = "";
+  $("#input").style.height = "auto";
+  const empty = document.querySelector(".empty");
+  if (empty) empty.remove();
+  addMsg("user", text);
+  await runStream(`/api/chats/${currentId}/message`, { text });
+}
+
+/* ---------- human-in-the-loop approval ---------- */
+function hideApproval() { const b = $("#approval"); b.hidden = true; b.innerHTML = ""; }
+function showApproval(calls) {
+  pendingCalls = calls;
+  setBusy(busy);
+  const box = $("#approval");
+  box.innerHTML = "";
+  box.hidden = false;
+  const warn = document.createElement("div");
+  warn.className = "warn";
+  warn.textContent = "🛑 The assistant wants to do the action below. Nothing happens until you approve. You can edit it first.";
+  box.append(warn);
+  calls.forEach((c) => {
+    const h = document.createElement("div");
+    h.innerHTML = "<strong>Action:</strong> <code></code>";
+    h.querySelector("code").textContent = c.name;
+    box.append(h);
+    Object.entries(c.args).forEach(([k, v]) => {
+      const lab = document.createElement("label");
+      lab.textContent = k;
+      const el = document.createElement(k === "body" ? "textarea" : "input");
+      if (k === "body") el.rows = 6;
+      el.value = String(v);
+      el.dataset.call = c.id;
+      el.dataset.key = k;
+      box.append(lab, el);
+    });
+  });
+  const row = document.createElement("div");
+  row.className = "row";
+  const ok = document.createElement("button");
+  ok.className = "btn primary";
+  ok.textContent = "✅ Approve";
+  ok.onclick = () => decide(true);
+  const no = document.createElement("button");
+  no.className = "btn";
+  no.textContent = "❌ Reject";
+  no.onclick = () => decide(false);
+  row.append(ok, no);
+  box.append(row);
+  scrollDown();
+}
+async function decide(approved) {
+  const args = {};
+  if (approved) {
+    document.querySelectorAll("#approval [data-call]").forEach((el) => {
+      (args[el.dataset.call] ||= {})[el.dataset.key] = el.value;
+    });
+  }
+  pendingCalls = null;
+  hideApproval();
+  await runStream(`/api/chats/${currentId}/decision`, { approved, args: approved ? args : null });
+}
+
+/* ---------- documents (RAG) ---------- */
+async function loadDocs() {
+  const { files } = await api("/api/docs");
+  const box = $("#docList");
+  box.innerHTML = "";
+  const names = Object.entries(files);
+  if (!names.length) box.innerHTML = '<div class="label">No documents yet.</div>';
+  names.forEach(([n, c]) => {
+    const d = document.createElement("div");
+    d.className = "doc";
+    d.textContent = `📄 ${n} · ${c} chunks`;
+    box.append(d);
+  });
+}
+async function uploadDocs() {
+  const input = $("#files");
+  if (!input.files.length) return;
+  const form = new FormData();
+  [...input.files].forEach((f) => form.append("files", f));
+  $("#status").textContent = "Indexing... (the first time it downloads the embedding model)";
+  $("#upload").disabled = true;
+  try {
+    const r = await api("/api/docs", { method: "POST", body: form });
+    $("#status").textContent = r.results.map((x) => (x.ok ? "✅ " : "⚠️ ") + x.message).join("\n");
+  } catch (e) {
+    $("#status").textContent = "⚠️ " + e.message;
+  }
+  input.value = "";
+  $("#upload").disabled = false;
+  await loadDocs();
+}
+async function clearDocs() {
+  if (!confirm("Remove all uploaded documents?")) return;
+  await api("/api/docs", { method: "DELETE" });
+  $("#status").textContent = "";
+  await loadDocs();
+}
+
+/* ---------- start ---------- */
+$("#newChat").onclick = newChat;
+$("#send").onclick = send;
+$("#upload").onclick = uploadDocs;
+$("#clearDocs").onclick = clearDocs;
+$("#input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+$("#input").addEventListener("input", (e) => { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px"; });
+
+(async () => {
+  await loadDocs();
+  const list = await api("/api/chats");
+  list.length ? await openChat(list[0].id) : await newChat();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.streamlit/secrets.toml
+
+# Local databases and private data
+*.db
+*.db-*
+outbox.jsonl
+
+# Generated RAG index and graph
+rag_store/
+graph.png
